@@ -1,77 +1,108 @@
-name: Test, build and deploy
+name: Continuous integration
 on: push
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:12-alpine
+        ports: ["5432:5432"]
+        env:
+          POSTGRES_PASSWORD: postgres
+
+      redis:
+        image: redis:alpine
+        ports: ["6379:6379"]
+
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch-oss:7.8.1
+        ports: ["9200:9200"]
+        options: -e="discovery.type=single-node"
+
     steps:
-    - uses: actions/checkout@master
+      - uses: actions/checkout@v2
 
-    - name: Prepare Elasticsearch
-      run: sudo sysctl -w vm.max_map_count=262144
-
-    - name: Build the stack
-      run: docker-compose -f docker-compose.test.yml build --pull
-
-    - name: Test
-      run: docker-compose -f docker-compose.test.yml run --rm app sh -c "yarn lint && bundle exec rubocop && ./docker/wait-for-services.sh && bundle exec rake db:create spec"
-
-  build:
-    runs-on: ubuntu-latest
-
-    if: github.event_name != 'pull_request'
-
-    steps:
-      - uses: actions/checkout@v1
-
-      - name: Build the production image
-        run: |
-          export COMMIT_TIME=$(git show -s --format=%ci ${GITHUB_SHA})
-          export COMMIT_SHA=${GITHUB_SHA}
-          docker-compose -f docker-compose.production.yml build --pull
-
-      - name: Save Docker image as file
-        run: docker save dockerrails_app_production | gzip > untested.tar.gz
-
-      - name: Upload Docker image as artifact
-        uses: actions/upload-artifact@v1
+      - name: Set up Ruby 2.7
+        uses: ruby/setup-ruby@v1
         with:
-          name: docker-image
-          path: untested.tar.gz
+          ruby-version: 2.7.1
+
+      - name: Cache Ruby gems
+        uses: actions/cache@v2
+        with:
+          path: vendor/bundle
+          key: ${{ runner.os }}-gem-${{ hashFiles('**/Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gem-
+
+      - name: Bundle gems
+        run: |
+          bundle config path vendor/bundle
+          bundle config set without 'production development'
+          bundle config --local build.sassc --disable-march-tune-native
+          bundle install --jobs 4 --retry 3
+
+      - name: Lint with RuboCop
+        run: bundle exec rubocop --parallel
+
+      - name: Get yarn cache
+        id: yarn-cache
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+
+      - uses: actions/cache@v2
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install Node modules
+        run: yarn install --frozen-lockfile
+
+      - name: Run Tests
+        env:
+          DB_HOST: localhost
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          RAILS_ENV: test
+          SECRET_KEY_BASE: we-dont-need-a-secret-here
+          APP_ADMIN_EMAIL: admin@example.org
+          APP_ADMIN_PASSWORD: secret
+          APP_EMAIL: reply@example.org
+          APP_HOST: example.org
+          AWS_ACCESS_KEY_ID: my-access-key
+          AWS_SECRET_ACCESS_KEY: my-secret
+          AWS_BUCKET: my-bucket
+          AWS_REGION: eu-central-1
+        run: |
+          bundle exec rake db:create db:schema:load
+          bundle exec rake spec
 
   deploy:
-    needs: [test, build]
-
     runs-on: ubuntu-latest
-
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master'
+    needs: test
 
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v2
 
-      - name: Download Docker image from build job
-        uses: actions/download-artifact@v1
-        with:
-          name: docker-image
+      - name: Login to GitHub Package Registry
+        run: docker login docker.pkg.github.com -u $GITHUB_ACTOR -p ${{ secrets.PACKAGES_TOKEN }}
 
-      - name: Load Docker image from file
-        shell: bash
-        run: docker load < docker-image/untested.tar.gz
-
-      - name: Login to GitLab Docker Registry
-        run: echo ${{ secrets.GITLAB_TOKEN }} | docker login -u gitlab-ci-token --password-stdin ${{ secrets.GITLAB_REGISTRY }}
-
-      - name: Push the image as LATEST and deploy
+      - name: Build, push and deploy the LATEST image
         if: github.ref == 'refs/heads/develop'
         run: |
-          docker tag dockerrails_app_production ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_REPO }}:latest
-          docker push ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_REPO }}:latest
+          export COMMIT_TIME=$(git show -s --format=%cD ${GITHUB_SHA})
+          export COMMIT_SHA=${GITHUB_SHA}
+          docker build --build-arg COMMIT_TIME --build-arg COMMIT_SHA -t docker.pkg.github.com/ledermann/docker-rails/docker-rails:latest .
+          docker push docker.pkg.github.com/ledermann/docker-rails/docker-rails:latest
           curl -X POST ${{ secrets.DEPLOY_HOOK_APP }}
           curl -X POST ${{ secrets.DEPLOY_HOOK_WORKER }}
 
-      - name: Push the image as STABLE
+      - name: Build and push the STABLE image
         if: github.ref == 'refs/heads/master'
         run: |
-          docker tag dockerrails_app_production ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_REPO }}:stable
-          docker push ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_REPO }}:stable
+          docker build -t docker.pkg.github.com/ledermann/docker-rails/docker-rails:stable .
+          docker push docker.pkg.github.com/ledermann/docker-rails/docker-rails:stable

@@ -1,27 +1,25 @@
 version: '3.4'
 services:
   db:
-    image: postgres:11-alpine
+    image: postgres:12-alpine
     environment:
-      - POSTGRES_PASSWORD
+      - POSTGRES_PASSWORD=foobar123
     volumes:
       - db-data:/var/lib/postgresql/data
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch-oss:6.8.3
+    image: docker.elastic.co/elasticsearch/elasticsearch-oss:7.8.1
     volumes:
       - es-data:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
 
   redis:
     image: redis:alpine
 
   app: &app_base
-    image: dockerrails_app_development
     build:
       context: .
-      args:
-        - ADDITIONAL_PACKAGES=nodejs yarn python2 build-base git
-        - RAILS_ENV=development
     environment:
       - ELASTICSEARCH_HOST=elasticsearch
       - REDIS_SIDEKIQ_URL=redis://redis:6379/0
@@ -31,9 +29,9 @@ services:
       - DB_HOST=db
       - DB_USER=postgres
       - DB_PASSWORD=foobar123
-      - RAILS_ENV=development
       - RAILS_MAX_THREADS
       - APP_HOST
+      - APP_SSL
       - FRONTEND_HOST
       - APP_ADMIN_EMAIL=admin@example.org
       - APP_ADMIN_PASSWORD=secret
@@ -58,8 +56,6 @@ services:
       - elasticsearch
       - db
       - redis
-    volumes:
-      - .:/app
 
   worker:
     <<: *app_base

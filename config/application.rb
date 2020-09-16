@@ -42,7 +42,7 @@ module DockerRails
       end
     end
 
-    config.middleware.insert_after ActionDispatch::Static, Rack::Deflater
+    config.middleware.insert_after ActionDispatch::Static, Rack::Deflater if ENV['RAILS_SERVE_STATIC_FILES'].present?
   end
 end
 
